@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"path/filepath"
 
 	"github.com/bradfitz/gomemcache/memcache"
 	gsm "github.com/bradleypeabody/gorilla-sessions-memcache"
@@ -657,7 +658,7 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		query,
 		me.ID,
 		mime,
-		filedata,
+		[]byte(""),
 		r.FormValue("body"),
 	)
 	if eerr != nil {
@@ -670,6 +671,23 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		fmt.Println(lerr.Error())
 		return
 	}
+
+	ext := ""
+	if mime == "image/jpeg" {
+		ext = "jpg"
+	}
+	if mime == "image/png" {
+		ext = "png"
+	}
+	if mime == "image/gif" {
+		ext = "gif"
+	}
+	f, err := os.Create(filepath.Join("../public/img", strconv.FormatInt(pid, 10) + "." + ext))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	f.Write(filedata)
 
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
 	return
@@ -823,6 +841,46 @@ func main() {
 		log.Fatalf("Failed to connect to DB: %s.", err.Error())
 	}
 	defer db.Close()
+
+	if os.Getenv("POST_EXTRACT") != "" {
+		rows, err := db.Query("select id, mime, imgdata from posts")
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println("a")
+		for rows.Next() {
+			var ID int
+			var mime string
+			var data []byte
+
+			err = rows.Scan(&ID, &mime, &data)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			ext := ""
+			if mime == "image/jpeg" {
+				ext = "jpg"
+			}
+			if mime == "image/png" {
+				ext = "png"
+			}
+			if mime == "image/gif" {
+				ext = "gif"
+			}
+			file, err := os.Create(filepath.Join("../public/img", strconv.Itoa(ID) + "." + ext))
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			_, err = file.Write(data)
+			if err != nil {
+				log.Fatal(err)
+			}
+			file.Close()
+		}
+		return
+	}
 
 	goji.Get("/initialize", getInitialize)
 	goji.Get("/login", getLogin)
