@@ -5,7 +5,7 @@ setup:
 	go get -u .
 
 run:
-	env ISUCONP_DB_PASSWORD='password' go run app.go
+	env ISUCONP_DB_PASSWORD='password' PPROF='y' go run app.go
 
 img:
 	env ISUCONP_DB_PASSWORD='password' POST_EXTRACT='y' go run app.go

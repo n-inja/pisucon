@@ -19,6 +19,8 @@ import (
 	"time"
 	"path/filepath"
 
+	_ "net/http/pprof"
+
 	"github.com/bradfitz/gomemcache/memcache"
 	gsm "github.com/bradleypeabody/gorilla-sessions-memcache"
 	_ "github.com/go-sql-driver/mysql"
@@ -188,22 +190,25 @@ func makePosts(results []Post, CSRFToken string, allComments bool) ([]Post, erro
 			return nil, err
 		}
 
-		query := "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC"
+		query := "SELECT comments.id, comments.post_id, comments.user_id, comments.comment, comments.created_at, users.id, users.account_name, users.passhash, users.authority, users.del_flg, users.created_at FROM comments LEFT JOIN users ON comments.user_id = users.id WHERE comments.post_id = ? ORDER BY comments.created_at DESC"
+
 		if !allComments {
 			query += " LIMIT 3"
 		}
 		var comments []Comment
-		cerr := db.Select(&comments, query, p.ID)
+		rows, cerr := db.Query(query, p.ID)
 		if cerr != nil {
 			return nil, cerr
 		}
-
-		for i := 0; i < len(comments); i++ {
-			uerr := db.Get(&comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
-			if uerr != nil {
-				return nil, uerr
+		for rows.Next() {
+			c := Comment{}
+			e := rows.Scan(&c.ID, &c.PostID, &c.UserID, &c.Comment, &c.CreatedAt, &c.User.ID, &c.User.AccountName, &c.User.Passhash, &c.User.Authority, &c.User.DelFlg, &c.User.CreatedAt)
+			if e != nil {
+				return nil, e
 			}
+			comments = append(comments, c)
 		}
+		rows.Close()
 
 		// reverse
 		for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
@@ -394,21 +399,113 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err := db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC")
+	rows, err := db.Query("SELECT posts.id, `user_id`, `body`, `mime`, posts.created_at, users.id, users.account_name, users.del_flg, users.created_at, users.authority, users.passhash FROM `posts` JOIN users ON posts.user_id = users.id WHERE users.del_flg = 0 ORDER BY posts.created_at DESC LIMIT 20")
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
+	q := ""
+	for rows.Next() {
+		p := Post{}
+		e := rows.Scan(&p.ID, &p.UserID, &p.Body, &p.Mime, &p.CreatedAt, &p.User.ID, &p.User.AccountName, &p.User.DelFlg, &p.User.CreatedAt, &p.User.Authority, &p.User.Passhash)
+		if e != nil {
+			fmt.Println(e)
+			return
+		}
+		p.CSRFToken = getCSRFToken(r)
+		if q == "" {
+			q = strconv.Itoa(p.ID)
+		} else {
+			q += ", " + strconv.Itoa(p.ID)
+		}
 
-	posts, merr := makePosts(results, getCSRFToken(r), false)
-	if merr != nil {
-		fmt.Println(merr)
+		results = append(results, p)
+	}
+	rows.Close()
+
+	rows3, err := db.Query("SELECT comments.post_id, count(*) FROM comments JOIN users ON comments.user_id = users.id WHERE comments.post_id IN ("+q+") GROUP BY comments.post_id")
+	if err != nil {
+		fmt.Println(err)
 		return
+	}
+	countMap := make(map[int]int, 20)
+	for rows3.Next() {
+		var PID, c int
+		e := rows3.Scan(&PID, &c)
+		if e != nil {
+			fmt.Println(e)
+			return
+		}
+		countMap[PID] = c
+	}
+	rows3.Close()
+
+	rows2, err := db.Query("SELECT comments.id, comments.post_id, comments.user_id, comments.comment, comments.created_at, users.id, users.account_name, users.passhash, users.authority, users.del_flg, users.created_at FROM comments JOIN users ON comments.user_id = users.id WHERE comments.post_id IN (" + q + ") ORDER BY comments.created_at DESC")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	commentMap := make(map[int][]Comment, 20)
+	for rows2.Next() {
+		c := Comment{}
+		e := rows2.Scan(&c.ID, &c.PostID, &c.UserID, &c.Comment, &c.CreatedAt, &c.User.ID, &c.User.AccountName, &c.User.Passhash, &c.User.Authority, &c.User.DelFlg, &c.User.CreatedAt)
+		if e != nil {
+			fmt.Println(e)
+			return
+		}
+		if cs, ok := commentMap[c.PostID]; ok {
+			if len(cs) > 2 {
+				continue
+			}
+			commentMap[c.PostID] = append(cs, c)
+		} else {
+			cs := []Comment{c}
+			commentMap[c.PostID] = cs
+		}
+	}
+	rows2.Close()
+
+	for i := range results {
+		// reverse
+		comments := commentMap[results[i].ID]
+		for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
+			comments[i], comments[j] = comments[j], comments[i]
+		}
+		results[i].Comments = comments
+		results[i].CommentCount = countMap[results[i].ID]
 	}
 
 	fmap := template.FuncMap{
 		"imageURL": imageURL,
 	}
+
+	/*
+	posts, err := makePosts(results, getCSRFToken(r), false)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	if len(posts) != len(results) {
+		fmt.Println("length")
+		return
+	}
+	for i := range posts {
+		if posts[i].Body != results[i].Body {
+			fmt.Println("posts", posts[i].ID, results[i].ID)
+			return
+		}
+		if len(posts[i].Comments) != len(results[i].Comments) {
+			fmt.Println("c length", posts[i].ID, results[i].ID)
+			return
+		}
+		for j := range posts[i].Comments {
+			if posts[i].Comments[j].Comment != results[i].Comments[j].Comment {
+				fmt.Println("comment", posts[i].ID, posts[i].Comments[j].ID, results[i].ID, results[i].Comments[j].ID)
+			}
+		}
+	}
+
+	 */
 
 	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
 		getTemplPath("layout.html"),
@@ -420,7 +517,7 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 		Me        User
 		CSRFToken string
 		Flash     string
-	}{posts, me, getCSRFToken(r), getFlash(w, r, "notice")})
+	}{results, me, getCSRFToken(r), getFlash(w, r, "notice")})
 }
 
 func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
@@ -658,7 +755,7 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		query,
 		me.ID,
 		mime,
-		[]byte(""),
+		filedata,
 		r.FormValue("body"),
 	)
 	if eerr != nil {
@@ -682,12 +779,16 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 	if mime == "image/gif" {
 		ext = "gif"
 	}
-	f, err := os.Create(filepath.Join("../public/img", strconv.FormatInt(pid, 10) + "." + ext))
+	name := filepath.Join("../public/image", strconv.FormatInt(pid, 10) + "." + ext)
+	f, err := os.Create(name)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	f.Write(filedata)
+	f.Close()
+
+	err = exec.Command("gzip", name).Run()
 
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
 	return
@@ -847,6 +948,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		defer rows.Close()
 		fmt.Println("a")
 		for rows.Next() {
 			var ID int
@@ -868,7 +970,8 @@ func main() {
 			if mime == "image/gif" {
 				ext = "gif"
 			}
-			file, err := os.Create(filepath.Join("../public/img", strconv.Itoa(ID) + "." + ext))
+			name := filepath.Join("../public/image", strconv.Itoa(ID) + "." + ext)
+			file, err := os.Create(name)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -878,8 +981,16 @@ func main() {
 				log.Fatal(err)
 			}
 			file.Close()
+
+			err = exec.Command("gzip", name).Run()
 		}
 		return
+	}
+
+	if os.Getenv("PPROF") != "" {
+		go func() {
+			http.ListenAndServe(":6060", nil)
+		}()
 	}
 
 	goji.Get("/initialize", getInitialize)
