@@ -1,0 +1,99 @@
+{% package main %}
+{% func serve(Posts []Post, Me User, CSRFToken string, Flash string) %}
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Iscogram</title>
+    <link href="/css/style.css" media="screen" rel="stylesheet" type="text/css">
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <div class="isu-title">
+          <h1><a href="/">Iscogram</a></h1>
+        </div>
+        <div class="isu-header-menu">
+          {% if Me.ID == 0 %}
+          <div><a href="/login">ログイン</a></div>
+          {% else %}
+          <div><a href="/@{%s Me.AccountName %}"><span class="isu-account-name">{%s Me.AccountName %}</span>さん</a></div>
+          {% if Me.Authority == 1 %}
+          <div><a href="/admin/banned">管理者用ページ</a></div>
+          {% endif %}
+          <div><a href="/logout">ログアウト</a></div>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="isu-submit">
+        <form method="post" action="/" enctype="multipart/form-data">
+          <div class="isu-form">
+            <input type="file" name="file" value="file">
+          </div>
+          <div class="isu-form">
+            <textarea name="body"></textarea>
+          </div>
+          <div class="form-submit">
+            <input type="hidden" name="csrf_token" value="{%s CSRFToken %}">
+            <input type="submit" name="submit" value="submit">
+          </div>
+          <div id="notice-message" class="alert alert-danger">
+            {%s Flash %}
+          </div>
+        </form>
+      </div>
+
+      <div class="isu-posts">
+        {% for _, post := range Posts %}
+        <div class="isu-post" id="pid_{%d post.ID %}" data-created-at="{%s post.CreatedAt.Format("2006-01-02T15:04:05-07:00") %}">
+          <div class="isu-post-header">
+            <a href="/@{%s post.User.AccountName %} " class="isu-post-account-name">{%s post.User.AccountName %}</a>
+            <a href="/posts/{%d post.ID %}" class="isu-post-permalink">
+              <time class="timeago" datetime="{%s post.CreatedAt.Format("2006-01-02T15:04:05-07:00") %}"></time>
+            </a>
+          </div>
+          <div class="isu-post-image">
+            <img src="{%s imageURL(post) %}" class="isu-image">
+          </div>
+          <div class="isu-post-text">
+            <a href="/@{%s post.User.AccountName %}" class="isu-post-account-name">{%s post.User.AccountName %}</a>
+            {%s post.Body %}
+          </div>
+          <div class="isu-post-comment">
+            <div class="isu-post-comment-count">
+              comments: <b>{%d post.CommentCount %}</b>
+            </div>
+
+            {% for _, comment := range post.Comments %}
+            <div class="isu-comment">
+              <a href="/@{%s comment.User.AccountName %}" class="isu-comment-account-name">{%s comment.User.AccountName %}</a>
+              <span class="isu-comment-text">{%s comment.Comment %}</span>
+            </div>
+            {% endfor %}
+            <div class="isu-comment-form">
+              <form method="post" action="/comment">
+                <input type="text" name="comment">
+                <input type="hidden" name="post_id" value="{%d post.ID %}">
+                <input type="hidden" name="csrf_token" value="{%s CSRFToken %}">
+                <input type="submit" name="submit" value="submit">
+              </form>
+            </div>
+          </div>
+        </div>
+
+        {% endfor %}
+      </div>
+
+      <div id="isu-post-more">
+        <button id="isu-post-more-btn">もっと見る</button>
+        <img class="isu-loading-icon" src="/img/ajax-loader.gif">
+      </div>
+    </div>
+    <script src="/js/jquery-2.2.0.js"></script>
+    <script src="/js/jquery.timeago.js"></script>
+    <script src="/js/jquery.timeago.ja.js"></script>
+    <script src="/js/main.js"></script>
+  </body>
+</html>
+{% endfunc %}
