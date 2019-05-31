@@ -49,6 +49,8 @@ const (
 	StatusUnprocessableEntity = 422
 )
 
+var sessionRegex, tokenRegex *regexp.Regexp
+
 type User struct {
 	ID          int       `db:"id"`
 	AccountName string    `db:"account_name"`
@@ -83,6 +85,8 @@ type Comment struct {
 func init() {
 	memcacheClient := memcache.New("localhost:11211")
 	store = gsm.NewMemcacheStore(memcacheClient, "isucogram_", []byte("sendagaya"))
+	sessionRegex = regexp.MustCompile(`^[^=]*=([^;]*);.*$`)
+	tokenRegex = regexp.MustCompile(`\*\*\*`)
 }
 
 func dbInitialize() {
@@ -169,6 +173,7 @@ func getSessionUser(r *http.Request) User {
 	if user, ok := sessionMap.Load(c.Value); ok {
 		return user.(User)
 	} else {
+		return User{}
 		session := getSession(r)
 		uid, ok = session.Values["user_id"]
 
@@ -312,7 +317,16 @@ func getInitialize(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+var s101 sync.Once
+var temp3 *template.Template
+
 func getLogin(w http.ResponseWriter, r *http.Request) {
+	s101.Do(func () {
+		temp3 = template.Must(template.ParseFiles(
+			getTemplPath("layout.html"),
+			getTemplPath("login.html")),
+		)
+	})
 	me := getSessionUser(r)
 
 	if isLogin(me) {
@@ -320,16 +334,17 @@ func getLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	template.Must(template.ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("login.html")),
-	).Execute(w, struct {
+	temp3.Execute(w, struct {
 		Me    User
 		Flash string
 	}{me, getFlash(w, r, "notice")})
 }
 
 func postLogin(w http.ResponseWriter, r *http.Request) {
+	s1.Do(func () {
+		sessionMap = sync.Map{}
+	})
+
 	if isLogin(getSessionUser(r)) {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
@@ -342,6 +357,7 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 		session.Values["user_id"] = u.ID
 		session.Values["csrf_token"] = secureRandomStr(16)
 		session.Save(r, w)
+		sessionMap.Store(sessionRegex.ReplaceAllString(w.Header().Get("set-cookie"), `$1`), *u)
 
 		http.Redirect(w, r, "/", http.StatusFound)
 	} else {
@@ -353,16 +369,22 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+var s102 sync.Once
+var temp4 *template.Template
+
 func getRegister(w http.ResponseWriter, r *http.Request) {
+	s102.Do(func () {
+		temp4 = template.Must(template.ParseFiles(
+			getTemplPath("layout.html"),
+			getTemplPath("register.html")),
+		)
+	})
 	if isLogin(getSessionUser(r)) {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
 
-	template.Must(template.ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("register.html")),
-	).Execute(w, struct {
+	temp4.Execute(w, struct {
 		Me    User
 		Flash string
 	}{User{}, getFlash(w, r, "notice")})
@@ -405,6 +427,12 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 		fmt.Println(eerr.Error())
 		return
 	}
+	var u User
+	err := db.QueryRow("SELECT id, account_name, passhash, authority, del_flg, created_at FROM users WHERE account_name = ?", accountName).Scan(&u.ID, &u.AccountName, &u.Passhash, &u.Authority, &u.DelFlg, &u.CreatedAt)
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
 
 	session := getSession(r)
 	uid, lerr := result.LastInsertId()
@@ -415,6 +443,7 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 	session.Values["user_id"] = uid
 	session.Values["csrf_token"] = secureRandomStr(16)
 	session.Save(r, w)
+	sessionMap.Store(sessionRegex.ReplaceAllString(w.Header().Get("set-cookie"), `$1`), u)
 
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -509,9 +538,6 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 		}
 		if cs, ok := commentMap[c.PostID]; ok {
 			countMap[c.PostID] += 1
-			if len(cs) > 2 {
-				continue
-			}
 			commentMap[c.PostID] = append(cs, c)
 		} else {
 			countMap[c.PostID] = 1
@@ -536,10 +562,11 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 
 var s4 sync.Once
 var stmt5, stmt6 *sql.Stmt
+var temp5 *template.Template
 func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 	s4.Do(func () {
 		var err error
-		stmt5, err = db.Prepare("SELECT posts.id, `user_id`, `body`, `mime`, posts.created_at, users.account_name, users.authority FROM `posts` JOIN users ON posts.user_id = users.id WHERE users.id = ? ORDER BY posts.created_at DESC LIMIT 20")
+		stmt5, err = db.Prepare("SELECT posts.id, `user_id`, `body`, `mime`, posts.created_at, users.account_name FROM `posts` JOIN users ON posts.user_id = users.id WHERE users.id = ? ORDER BY posts.created_at DESC LIMIT 20")
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -549,12 +576,21 @@ func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 			fmt.Println(err)
 			return
 		}
+		fmap := template.FuncMap{
+			"imageURL": imageURL,
+		}
+		temp5 = template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
+			getTemplPath("layout.html"),
+			getTemplPath("user.html"),
+			getTemplPath("posts.html"),
+			getTemplPath("post.html"),
+		))
 	})
 	user := User{}
 	commentCount := 0
 	postCount := 0
 
-	uerr := db.QueryRow("SELECT users.id, users.account_name, users.del_flg, users.passhash, users.created_at, users.authority, count(*) FROM users LEFT JOIN comments ON users.id = comments.user_id WHERE users.account_name = ? AND users.del_flg = 0 GROUP BY users.id", c.URLParams["accountName"]).Scan(&user.ID, &user.AccountName, &user.DelFlg, &user.Passhash, &user.CreatedAt, &user.Authority, &commentCount)
+	uerr := db.QueryRow("SELECT users.id, users.account_name, count(*) FROM users LEFT JOIN comments ON users.id = comments.user_id WHERE users.account_name = ? AND users.del_flg = 0 GROUP BY users.id", c.URLParams["accountName"]).Scan(&user.ID, &user.AccountName, &commentCount)
 
 	if uerr != nil {
 		fmt.Println(uerr)
@@ -577,7 +613,7 @@ func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 	args := make([]interface{}, 20)
 	for rows.Next() {
 		p := Post{}
-		e := rows.Scan(&p.ID, &p.UserID, &p.Body, &p.Mime, &p.CreatedAt, &p.User.AccountName, &p.User.Authority)
+		e := rows.Scan(&p.ID, &p.UserID, &p.Body, &p.Mime, &p.CreatedAt, &p.User.AccountName)
 		if e != nil {
 			fmt.Println(e)
 			return
@@ -592,7 +628,9 @@ func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 	rows.Close()
 
 	var rows2 *sql.Rows
-	if count < 20 {
+	if count == 0 {
+
+	} else if count < 20 {
 		q := ""
 		for _, p := range results {
 			if q == "" {
@@ -616,27 +654,29 @@ func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 
 	commentMap := make(map[int][]Comment, 20)
 	countMap := make(map[int]int, 20)
-	for rows2.Next() {
-		c := Comment{}
-		e := rows2.Scan(&c.ID, &c.PostID, &c.UserID, &c.Comment, &c.CreatedAt, &c.User.AccountName)
-		c.User.ID = c.UserID
-		if e != nil {
-			fmt.Println(e)
-			return
-		}
-		if cs, ok := commentMap[c.PostID]; ok {
-			countMap[c.PostID] += 1
-			if len(cs) > 2 {
-				continue
+	if count > 0 {
+		for rows2.Next() {
+			c := Comment{}
+			e := rows2.Scan(&c.ID, &c.PostID, &c.UserID, &c.Comment, &c.CreatedAt, &c.User.AccountName)
+			c.User.ID = c.UserID
+			if e != nil {
+				fmt.Println(e)
+				return
 			}
-			commentMap[c.PostID] = append(cs, c)
-		} else {
-			countMap[c.PostID] = 1
-			cs := []Comment{c}
-			commentMap[c.PostID] = cs
+			if cs, ok := commentMap[c.PostID]; ok {
+				countMap[c.PostID] += 1
+				if len(cs) > 2 {
+					continue
+				}
+				commentMap[c.PostID] = append(cs, c)
+			} else {
+				countMap[c.PostID] = 1
+				cs := []Comment{c}
+				commentMap[c.PostID] = cs
+			}
 		}
+		rows2.Close()
 	}
-	rows2.Close()
 
 	for i := range results {
 		// reverse
@@ -647,7 +687,7 @@ func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 		results[i].Comments = comments
 		results[i].CommentCount = countMap[results[i].ID]
 	}
-	
+
 	commentedCount := 0
 	perr := db.QueryRow("SELECT count(comments.id), count(DISTINCT posts.id) FROM posts LEFT JOIN comments ON posts.id = comments.post_id WHERE posts.user_id = ?", user.ID).Scan(&commentedCount, &postCount)
 	if perr != nil {
@@ -657,16 +697,7 @@ func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 
 	me := getSessionUser(r)
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("user.html"),
-		getTemplPath("posts.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, struct {
+	temp5.Execute(w, struct {
 		Posts          []Post
 		User           User
 		PostCount      int
@@ -677,20 +708,26 @@ func getAccountName(c web.C, w http.ResponseWriter, r *http.Request) {
 }
 
 var s3 sync.Once
-var stmt3, stmt4 *sql.Stmt
+var stmt3 *sql.Stmt
+var stmt4 []*sql.Stmt
 
 func getPosts(w http.ResponseWriter, r *http.Request) {
 	s3.Do(func () {
 		var err error
-		stmt3, err = db.Prepare("SELECT posts.id, `user_id`, `body`, `mime`, posts.created_at, users.account_name, users.authority FROM `posts` JOIN users ON posts.user_id = users.id WHERE posts.created_at <= ? AND users.del_flg = 0 ORDER BY posts.created_at DESC LIMIT 20")
+		stmt3, err = db.Prepare("SELECT posts.id, `user_id`, `body`, `mime`, posts.created_at, users.account_name FROM `posts` JOIN users ON posts.user_id = users.id WHERE posts.created_at <= ? AND users.del_flg = 0 ORDER BY posts.created_at DESC LIMIT 20")
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
-		stmt4, err = db.Prepare("SELECT id, post_id, user_id, comment, created_at, account_name FROM comments WHERE post_id IN (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ORDER BY created_at DESC")
-		if err != nil {
-			fmt.Println(err)
-			return
+		q := "?"
+		for i := 0; i < 20; i += 1 {
+			stmt, err := db.Prepare("SELECT id, post_id, user_id, comment, created_at, account_name FROM comments WHERE post_id IN (" +q+") ORDER BY created_at DESC")
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+			q += ",?"
+			stmt4 = append(stmt4, stmt)
 		}
 	})
 
@@ -722,7 +759,7 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	args := make([]interface{}, 20)
 	for rows.Next() {
 		p := Post{}
-		e := rows.Scan(&p.ID, &p.UserID, &p.Body, &p.Mime, &p.CreatedAt, &p.User.AccountName, &p.User.Authority)
+		e := rows.Scan(&p.ID, &p.UserID, &p.Body, &p.Mime, &p.CreatedAt, &p.User.AccountName)
 		if e != nil {
 			fmt.Println(e)
 			return
@@ -737,26 +774,10 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	rows.Close()
 
 	var rows2 *sql.Rows
-	if count < 20 {
-		q := ""
-		for _, p := range results {
-			if q == "" {
-				q = strconv.Itoa(p.ID)
-			} else {
-				q += ", " + strconv.Itoa(p.ID)
-			}
-		}
-		rows2, err = db.Query("SELECT id, post_id, user_id, comment, created_at, account_name FROM comments WHERE post_id IN (" + q + ") ORDER BY created_at DESC")
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-	} else {
-		rows2, err = stmt4.Query(args...)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
+	rows2, err = stmt4[len(args) - 1].Query(args...)
+	if err != nil {
+		fmt.Println(err)
+		return
 	}
 
 	commentMap := make(map[int][]Comment, 20)
@@ -801,21 +822,47 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	writeserveposts(w, results, getCSRFToken(r))
 }
 
+var s5 sync.Once
+var stmt7, stmt8 *sql.Stmt
+var temp7 *template.Template
+
 func getPostsID(c web.C, w http.ResponseWriter, r *http.Request) {
+	s5.Do(func () {
+		var err error
+		stmt7, err = db.Prepare("SELECT posts.id, `user_id`, `body`, `mime`, posts.created_at, users.account_name, users.authority FROM `posts` JOIN users ON posts.user_id = users.id WHERE posts.id = ? AND users.del_flg = 0 ORDER BY posts.created_at DESC LIMIT 20")
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		stmt8, err = db.Prepare("SELECT id, post_id, user_id, comment, created_at, account_name FROM comments WHERE post_id = ? ORDER BY created_at DESC")
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		fmap := template.FuncMap{
+			"imageURL": imageURL,
+		}
+
+		temp7 = template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
+			getTemplPath("layout.html"),
+			getTemplPath("post_id.html"),
+			getTemplPath("post.html"),
+		))
+	})
 	pid, err := strconv.Atoi(c.URLParams["id"])
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
-	results := []Post{}
-	rerr := db.Select(&results, "SELECT * FROM `posts` WHERE `id` = ?", pid)
+	post := make([]Post, 1)
+	rerr := stmt7.QueryRow(pid).Scan(&post[0].ID, &post[0].UserID, &post[0].Body, &post[0].Mime, &post[0].CreatedAt, &post[0].User.AccountName, &post[0].User.Authority)
 	if rerr != nil {
-		fmt.Println(rerr)
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
-	posts, merr := makePosts(results, getCSRFToken(r), true)
+	posts, merr := makePosts(post, getCSRFToken(r), true)
 	if merr != nil {
 		fmt.Println(merr)
 		return
@@ -830,15 +877,7 @@ func getPostsID(c web.C, w http.ResponseWriter, r *http.Request) {
 
 	me := getSessionUser(r)
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("post_id.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, struct {
+	temp7.Execute(w, struct {
 		Post Post
 		Me   User
 	}{p, me})
@@ -999,7 +1038,15 @@ func postComment(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, fmt.Sprintf("/posts/%d", postID), http.StatusFound)
 }
 
+var temp6 *template.Template
+var s100 sync.Once
 func getAdminBanned(w http.ResponseWriter, r *http.Request) {
+	s100.Do(func () {
+		temp6 = template.Must(template.ParseFiles(
+			getTemplPath("layout.html"),
+			getTemplPath("banned.html")),
+		)
+	})
 	me := getSessionUser(r)
 	if !isLogin(me) {
 		http.Redirect(w, r, "/", http.StatusFound)
@@ -1018,10 +1065,7 @@ func getAdminBanned(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	template.Must(template.ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("banned.html")),
-	).Execute(w, struct {
+	temp6.Execute(w, struct {
 		Users     []User
 		Me        User
 		CSRFToken string
@@ -1045,12 +1089,19 @@ func postAdminBanned(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := "UPDATE `users` SET `del_flg` = 1 WHERE `id` = ?"
+	query := "UPDATE `users` SET `del_flg` = 1 WHERE `id` IN ("
 
 	r.ParseForm()
-	for _, id := range r.Form["uid[]"] {
-		db.Exec(query, id)
+	for i, id := range r.Form["uid[]"] {
+		if i == 0 {
+			query += id
+		} else {
+			query += "," + id
+		}
 	}
+	query += ")"
+
+	db.Exec(query)
 
 	http.Redirect(w, r, "/admin/banned", http.StatusFound)
 }
@@ -1079,11 +1130,9 @@ func main() {
 	}
 
 	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=true&loc=Local",
+		"%s:%s@unix(/var/run/mysqld/mysqld.sock)/%s?charset=utf8mb4&parseTime=true&loc=Local",
 		user,
 		password,
-		host,
-		port,
 		dbname,
 	)
 
